@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Perguntar — Gemini Gems & Gemini Notebook
 // @namespace    local.ricardo.gemini-quick-search
-// @version      3.0.0
+// @version      3.1.0
 // @description  Alt+G: escolha um Gem ou Notebook, digite a pergunta, Enter. O script abre o alvo, preenche o campo e envia. Seletores verificados no DOM real (ago/2026).
 // @author       Ricardo
 // @match        https://gemini.google.com/*
@@ -36,6 +36,11 @@
  *             notebooks: project-button > a[href=".../notebook/{uuid}"]
  *   A indexação aceita SÓ URLs nesses formatos exatos — links de conversas
  *   (/gem/{id}/{conversa}) e texto solto ficam de fora (era a origem do lixo).
+ *
+ * CARREGAMENTO A FRIO (aba nova): o campo aparece antes de o app terminar de
+ * inicializar; o primeiro clique em "Enviar" é ignorado (ou o editor apaga o
+ * texto ao iniciar). Por isso askHere espera o campo estabilizar, confirma que a
+ * pergunta apareceu na conversa e repete (reescreve/clica/Enter) até 5 vezes.
  *
  * Trusted Types: nada de innerHTML — DOM só via createElement/textContent.
  * CSP: os @grant mantêm o script no sandbox da extensão (com @grant none seria
@@ -217,7 +222,7 @@
   function findComposerHere() {
     if (onNotebookPage()) {
       const n = document.querySelector('query-box textarea');
-      return n && visible(n) ? { node: n, site: 'notebook' } : null;
+      return n && visible(n) && !n.disabled ? { node: n, site: 'notebook' } : null;
     }
     if (onGemPage()) {
       const n = document.querySelector('rich-textarea div[contenteditable="true"]');
@@ -263,21 +268,74 @@
     return null;
   }
 
-  async function askHere(prompt) {
-    const found = await waitFor(findComposerHere, 25000, 300);
-    if (!found) { toast('Não achei o campo de pergunta nesta página.'); return false; }
-    await sleep(400);
-    const ok = found.site === 'notebook'
-      ? fillNotebook(found.node, prompt)
-      : fillGem(found.node, prompt);
-    if (!ok) { toast('Não consegui escrever no campo — veja o console.'); LOG('preenchimento falhou', found); return false; }
-    const btn = await waitFor(() => findSendButton(found.site), 8000, 200);
-    if (btn) { btn.click(); return true; }
-    LOG('sem botão de envio habilitado; usando Enter');
+  const composerText = (c) =>
+    collapse(c.site === 'notebook' ? c.node.value : c.node.textContent);
+  const composerHas = (c, snippet) => composerText(c).indexOf(snippet) >= 0;
+
+  function pressEnter(node) {
     const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-    found.node.dispatchEvent(new KeyboardEvent('keydown', opts));
-    found.node.dispatchEvent(new KeyboardEvent('keyup', opts));
-    return true;
+    node.focus();
+    node.dispatchEvent(new KeyboardEvent('keydown', opts));
+    node.dispatchEvent(new KeyboardEvent('keypress', opts));
+    node.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  /** O app só é considerado pronto quando o mesmo nó do campo sobrevive `ms` sem ser trocado. */
+  async function waitComposerStable(ms) {
+    let cur = await waitFor(findComposerHere, 25000, 300);
+    if (!cur) return null;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await sleep(ms);
+      const again = findComposerHere();
+      if (again && again.node === cur.node) return again;
+      if (again) cur = again; // o app re-renderizou o campo; recomeça a contagem
+    }
+    return cur;
+  }
+
+  /**
+   * Envio confirmado = o campo não contém mais a pergunta E ela aparece
+   * em outro lugar da página (balão da conversa). Só esvaziar não basta:
+   * no carregamento a frio o app pode re-inicializar o editor e apagar o texto.
+   */
+  function sentConfirmed(c, snippet, hrefBefore) {
+    const cur = findComposerHere() || c;
+    if (composerHas(cur, snippet)) return false;
+    if (location.href !== hrefBefore) return true;
+    return collapse(document.body.innerText).indexOf(snippet) >= 0;
+  }
+
+  async function askHere(prompt) {
+    const snippet = collapse(prompt).slice(0, 25);
+    let c = await waitComposerStable(700);
+    if (!c) { toast('Não achei o campo de pergunta nesta página.'); return false; }
+    const hrefBefore = location.href;
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      c = findComposerHere() || c;
+
+      // 1) escrever (ou reescrever, se o app apagou o texto ao inicializar)
+      if (!composerHas(c, snippet)) {
+        const ok = c.site === 'notebook' ? fillNotebook(c.node, prompt) : fillGem(c.node, prompt);
+        if (!ok) { toast('Não consegui escrever no campo — veja o console.'); LOG('preenchimento falhou', c); return false; }
+        await sleep(350 + attempt * 250);
+        if (!composerHas(c, snippet)) { LOG('tentativa', attempt, ': texto apagado pelo app; reescrevendo'); continue; }
+      }
+
+      // 2) enviar
+      const btn = await waitFor(() => findSendButton(c.site), 4000, 150);
+      if (btn) btn.click(); else { LOG('sem botão de envio habilitado; usando Enter'); pressEnter(c.node); }
+
+      // 3) confirmar; no carregamento a frio o primeiro clique costuma ser ignorado
+      if (await waitFor(() => sentConfirmed(c, snippet, hrefBefore), 2500, 150)) return true;
+      LOG('tentativa', attempt, ': envio não confirmado; repetindo');
+      if (composerHas(findComposerHere() || c, snippet)) pressEnter((findComposerHere() || c).node);
+      if (await waitFor(() => sentConfirmed(c, snippet, hrefBefore), 1500, 150)) return true;
+    }
+    toast('Não consegui confirmar o envio — veja o console.');
+    LOG('envio não confirmado após 5 tentativas', c);
+    return false;
   }
 
   // ------------------------------------------------------------- pedido pendente
