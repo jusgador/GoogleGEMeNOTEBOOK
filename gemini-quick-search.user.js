@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         Perguntar — Gemini Gems & Gemini Notebook
 // @namespace    local.ricardo.gemini-quick-search
-// @version      3.1.0
+// @version      3.1.1
+// @updateURL    https://raw.githubusercontent.com/jusgador/GoogleGEMeNOTEBOOK/master/gemini-quick-search.user.js
+// @downloadURL  https://raw.githubusercontent.com/jusgador/GoogleGEMeNOTEBOOK/master/gemini-quick-search.user.js
 // @description  Alt+G: escolha um Gem ou Notebook, digite a pergunta, Enter. O script abre o alvo, preenche o campo e envia. Seletores verificados no DOM real (ago/2026).
 // @author       Ricardo
 // @match        https://gemini.google.com/*
